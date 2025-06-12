@@ -1,20 +1,34 @@
 import json
 import re
+import os
+import boto3
 from typing import Dict, Any, Optional
 
 import lark_oapi as lark
 from lark_oapi.api.im.v1 import (
     ReplyMessageRequest,
     ReplyMessageRequestBody,
-    ReplyMessageResponse
+    ReplyMessageResponse,
 )
 
-from intent_recognition import check_if_aws_question
+from intent_recognition import check_if_valid_question
 
-# 应用ID和密钥映射
-APP_ID_SECRET_MAP = {
-    
-}
+"""
+飞书应用 APP_ID 和 SECRET，可支持多应用：
+LARK_APP_ID: ID_1,ID_2
+LARK_SECRET: SECRET_1,SECRET_2
+"""
+LARK_APP_ID = os.environ.get("LARK_APP_ID")
+LARK_SECRET = os.environ.get("LARK_SECRET")
+APP_ID_SECRET_MAP = {}
+
+for i, app_id in enumerate(LARK_APP_ID.split(",")):
+    secret = LARK_SECRET.split(",")[i]
+    APP_ID_SECRET_MAP[app_id] = secret
+
+KNOWLEDGE_BASE_ID = os.environ.get("KNOWLEDGE_BASE_ID", "")
+KNOWLEDGE_MODEL_ARN = os.environ.get("MODEL_ARN", "")
+
 
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     print(f"收到事件: {event.get('body', {})}")
@@ -22,23 +36,24 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     try:
         data = json.loads(event.get("body", "{}"))
     except json.JSONDecodeError:
-        return _create_response(400, "Invalid JSON")
+        return create_response(400, "Invalid JSON")
 
-    # 处理URL验证请求
+    # 处理飞书开放平台的 URL 合法性验证请求
     if "challenge" in data:
         challenge = data["challenge"]
-        return _create_response(200, json.dumps({"challenge": challenge}))
-    
+        return create_response(200, json.dumps({"challenge": challenge}))
+
     # 处理消息事件
     try:
         response = process_message(data)
-        return _create_response(200, response)
+        return create_response(200, response)
     except Exception as e:
         print(f"处理消息时发生错误: {e}")
-        return _create_response(200, "Error")
+        # 仍然返回 200，否则飞书开放平台会反复重试
+        return create_response(200, "Error")
 
 
-def _create_response(status_code: int, body: str) -> Dict[str, Any]:
+def create_response(status_code: int, body: str) -> Dict[str, Any]:
     return {
         "statusCode": status_code,
         "headers": {"Content-Type": "application/json"},
@@ -47,67 +62,101 @@ def _create_response(status_code: int, body: str) -> Dict[str, Any]:
 
 
 def remove_mentions(text: str) -> str:
-    return re.sub(r'\\?@\w+', '', text).strip()
+    return re.sub(r"\\?@\w+", "", text).strip()
 
 
 def process_message(data: Dict[str, Any]) -> str:
-    # 检查消息类型
+    """
+    在1秒内返回首次回复，否则飞书会重试
+    """
+    # 检查消息类型是否为纯文字
     if data.get("event", {}).get("message", {}).get("message_type") != "text":
         return send_lark_request(
             data.get("header", {}).get("app_id", ""),
             data.get("event", {}).get("message", {}).get("message_id", ""),
-            json.dumps({"text": "解析消息失败，请发送文本消息"})
+            json.dumps({"text": "解析消息失败，请发送文本消息"}),
         )
 
     # 提取消息信息
     app_id = data.get("header", {}).get("app_id", "")
     message_id = data.get("event", {}).get("message", {}).get("message_id", "")
-    
+
     try:
-        content = json.loads(data.get("event", {}).get("message", {}).get("content", "{}"))
-        message_text = content.get("text", "")
-    except (json.JSONDecodeError, AttributeError):
-        return send_lark_request(app_id, message_id, json.dumps({"text": "解析消息内容失败"}))
-    
-    # 移除@提及
-    message_text = remove_mentions(message_text)
-    
-    # 使用AWS Bedrock Claude进行意图识别
-    try:
-        is_aws_question = check_if_aws_question(message_text)
-        
-        if is_aws_question:
-            response_text = "收到问题，处理中..."
+        content = json.loads(
+            data.get("event", {}).get("message", {}).get("content", "{}")
+        )
+        # 移除 @at
+        message_text = remove_mentions(content.get("text", ""))
+
+        # 使用 AWS Bedrock LLM 进行意图识别
+        question_type = check_if_valid_question(message_text)
+
+        if question_type:
+            if question_type == "AWS":
+                # 调用 Q CLI Service
+                send_lark_request(
+                    app_id, message_id, json.dumps({"text": "调用 Q CLI 实现中..."})
+                )
+            elif question_type == "知识库":
+                if KNOWLEDGE_BASE_ID and KNOWLEDGE_MODEL_ARN:
+                    knowledge_base_client = boto3.client(
+                        service_name="bedrock-agent-runtime"
+                    )
+                    response = knowledge_base_client.retrieve_and_generate(
+                        input={"text": message_text},
+                        retrieveAndGenerateConfiguration={
+                            "type": "KNOWLEDGE_BASE",
+                            "knowledgeBaseConfiguration": {
+                                "knowledgeBaseId": KNOWLEDGE_BASE_ID,
+                                "modelArn": KNOWLEDGE_MODEL_ARN,
+                            },
+                        },
+                    )
+                    response_text = response["output"]["text"]
+                    send_lark_request(
+                        app_id,
+                        message_id,
+                        json.dumps(
+                            {"text": f"调用知识库的结果：{response_text}"}
+                        ),
+                    )
+                else:
+                    send_lark_request(
+                        app_id, message_id, json.dumps({"text": "知识库实现中..."})
+                    )
+
+            return send_lark_request(
+                app_id, message_id, json.dumps({"text": "收到问题，处理中..."})
+            )
         else:
-            response_text = "抱歉，我只能回答关于AWS和软件开发相关的问题。"
-            
-        return send_lark_request(app_id, message_id, json.dumps({"text": response_text}))
+            response_text = "抱歉，我只能回答关于 AWS、软件开发相关以及知识库 的问题。"
+            return send_lark_request(
+                app_id, message_id, json.dumps({"text": response_text})
+            )
+
     except Exception as e:
-        print(f"意图识别过程中发生错误: {e}")
-        return send_lark_request(app_id, message_id, json.dumps({"text": "处理消息时发生错误，请稍后再试"}))
+        print(f"处理问题时发生错误: {e}")
+        return send_lark_request(
+            app_id, message_id, json.dumps({"Error": "处理问题时发生错误"})
+        )
 
 
 def send_lark_request(app_id: str, message_id: str, content: str) -> str:
     # 检查必要参数
     if not app_id or not message_id or not content:
-        print("缺少必要参数")
-        return "Missing required parameters"
-    
+        print("缺少必要参数")        
+        return {"Error": "缺少必要参数"}
+
     # 获取应用密钥
     app_secret = APP_ID_SECRET_MAP.get(app_id)
     if not app_secret:
         print(f"未找到应用ID对应的密钥: {app_id}")
-        return "Invalid app_id"
-    
+        return {"Error": "未找到应用ID对应的密钥"}
+
     try:
-        # 创建客户端
-        client = (
-            lark.Client.builder()
-            .app_id(app_id)
-            .app_secret(app_secret)
-            .build()
-        )
-        
+        # 创建飞书客户端
+        client = lark.Client.builder().app_id(app_id).app_secret(app_secret).build()
+
         # 构造请求对象
         request = (
             ReplyMessageRequest.builder()
@@ -128,9 +177,7 @@ def send_lark_request(app_id: str, message_id: str, content: str) -> str:
         # 处理响应
         if not response.success():
             print(f"飞书API调用失败: {response.msg}")
-            return response.msg
-
-        return str(response.code)
+            return {"Error": f"{response.msg}"}
     except Exception as e:
         print(f"发送飞书消息时发生错误: {e}")
-        return f"Error: {str(e)}"
+        return {"Error": str(e)}

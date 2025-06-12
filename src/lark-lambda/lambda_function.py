@@ -18,16 +18,16 @@ from intent_recognition import check_if_valid_question
 LARK_APP_ID: ID_1,ID_2
 LARK_SECRET: SECRET_1,SECRET_2
 """
-LARK_APP_ID = os.environ.get("LARK_APP_ID")
-LARK_SECRET = os.environ.get("LARK_SECRET")
+LARK_APP_ID = os.environ.get("LARK_APP_ID").strip()
+LARK_SECRET = os.environ.get("LARK_SECRET").strip()
 APP_ID_SECRET_MAP = {}
 
 for i, app_id in enumerate(LARK_APP_ID.split(",")):
-    secret = LARK_SECRET.split(",")[i]
+    secret = LARK_SECRET.split(",")[i].strip()
     APP_ID_SECRET_MAP[app_id] = secret
 
-KNOWLEDGE_BASE_ID = os.environ.get("KNOWLEDGE_BASE_ID", "")
-KNOWLEDGE_MODEL_ARN = os.environ.get("MODEL_ARN", "")
+KNOWLEDGE_BASE_ID = os.environ.get("KNOWLEDGE_BASE_ID", "").strip()
+KNOWLEDGE_MODEL_ARN = os.environ.get("MODEL_ARN", "").strip()
 
 
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
@@ -94,8 +94,8 @@ def process_message(data: Dict[str, Any]) -> str:
         if question_type:
             if question_type == "AWS":
                 # 调用 Q CLI Service
-                send_lark_request(
-                    app_id, message_id, json.dumps({"text": "调用 Q CLI 实现中..."})
+                return send_lark_request(
+                    app_id, message_id, json.dumps({"text": "Q CLI 尚未实现"})
                 )
             elif question_type == "知识库":
                 if KNOWLEDGE_BASE_ID and KNOWLEDGE_MODEL_ARN:
@@ -113,23 +113,24 @@ def process_message(data: Dict[str, Any]) -> str:
                         },
                     )
                     response_text = response["output"]["text"]
-                    send_lark_request(
+                    return send_lark_request(
                         app_id,
                         message_id,
-                        json.dumps(
-                            {"text": f"调用知识库的结果：{response_text}"}
-                        ),
+                        json.dumps({"text": f"调用知识库的结果：{response_text}"}),
                     )
                 else:
-                    send_lark_request(
-                        app_id, message_id, json.dumps({"text": "知识库实现中..."})
+                    return send_lark_request(
+                        app_id, message_id, json.dumps({"text": "知识库尚未实现"})
                     )
+            else:
+                return send_lark_request(
+                    app_id,
+                    message_id,
+                    json.dumps({"text": f"未知问题类型：{question_type}"}),
+                )
 
-            return send_lark_request(
-                app_id, message_id, json.dumps({"text": "收到问题，处理中..."})
-            )
         else:
-            response_text = "抱歉，我只能回答关于 AWS、软件开发相关以及知识库 的问题。"
+            response_text = "抱歉，我只能回答关于 AWS、软件开发相关以及企业内的知识库问题。"
             return send_lark_request(
                 app_id, message_id, json.dumps({"text": response_text})
             )
@@ -144,7 +145,7 @@ def process_message(data: Dict[str, Any]) -> str:
 def send_lark_request(app_id: str, message_id: str, content: str) -> str:
     # 检查必要参数
     if not app_id or not message_id or not content:
-        print("缺少必要参数")        
+        print("缺少必要参数")
         return {"Error": "缺少必要参数"}
 
     # 获取应用密钥

@@ -1,0 +1,26 @@
+{
+   "mcpServers": {
+      "awslabs_support_mcp_server": {
+         "command": "awslabs.aws-support-mcp-server",
+         "args": [
+            "--debug",
+            "--log-file",
+            "~/.aws/amazonq/mcp.log"
+         ],
+         "env": {
+            "AWS_PROFILE": "default"
+         }
+      },
+      "awslabs.bedrock-kb-retrieval-mcp-server": {
+      "command": "awslabs.bedrock-kb-retrieval-mcp-server",
+      "env": {
+        "AWS_PROFILE": "default",
+        "AWS_REGION": "us-east-1",
+        "BEDROCK_KB_RERANKING_ENABLED": "false",
+      "KB_INCLUSION_TAG_KEY": "mcp-multirag-kb"
+      },
+      "disabled": false,
+      "autoApprove": ["QueryKnowledgeBases"]
+    }
+   }
+}

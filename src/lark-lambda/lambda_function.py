@@ -3,6 +3,7 @@ import re
 import os
 import boto3
 from typing import Dict, Any
+import threading
 
 import lark_oapi as lark
 from lark_oapi.api.im.v1 import (
@@ -96,12 +97,15 @@ def process_message(data: Dict[str, Any]) -> str:
         if question_type:
             if question_type == "AWS":
                 # 转发 data 请求到 QLI_SERVER_ADDRESS
-                print(f"Sending message to: {QLI_SERVER_ADDRESS}...")
-                response = requests.post(
-                    QLI_SERVER_ADDRESS,
-                    data=json.dumps(data),
-                    headers={"Content-Type": "application/json"},
-                )
+                def send_request():
+                    print(f"Sending message to: {QLI_SERVER_ADDRESS}...")
+                    requests.post(
+                        QLI_SERVER_ADDRESS,
+                        data=json.dumps(data),
+                        headers={"Content-Type": "application/json"},
+                    )
+                
+                threading.Thread(target=send_request, daemon=True).start()
                 return {"Result": "Send message successfully."}
             elif question_type == "知识库":
                 if KNOWLEDGE_BASE_ID and KNOWLEDGE_MODEL_ARN:

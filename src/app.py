@@ -27,6 +27,14 @@ CONVERSATION_EXPIRY = 3600  # 1小时
 # 对话历史锁，防止并发访问冲突
 history_lock = threading.Lock()
 
+# Thread映射相关变量
+# 格式: {thread_id: user_id}
+thread_user_map = {}
+# 格式: {user_id: message_id} - 记录用户最近@机器人的消息ID
+user_last_mention_map = {}
+# Thread映射锁
+thread_map_lock = threading.Lock()
+
 """
 飞书应用 APP_ID 和 SECRET，可支持多应用：
 LARK_APP_ID: ID_1,ID_2
@@ -45,6 +53,82 @@ if LARK_APP_ID and LARK_SECRET:
 def remove_mentions(text: str) -> str:
     """移除文本中的@提及"""
     return re.sub(r"\\?@\w+", "", text).strip()
+
+
+def add_user_mention_record(user_id: str, message_id: str) -> None:
+    """
+    记录用户@机器人的消息ID，用于后续thread映射
+    
+    参数:
+        user_id: 用户ID
+        message_id: 消息ID
+    """
+    with thread_map_lock:
+        user_last_mention_map[user_id] = message_id
+        print(f"记录用户@机器人: {user_id} -> {message_id}")
+
+
+def try_map_thread_to_user(thread_id: str) -> Optional[str]:
+    """
+    尝试将thread映射到用户，基于最近的@机器人记录
+    
+    参数:
+        thread_id: 线程ID
+        
+    返回:
+        可能的用户ID
+    """
+    with thread_map_lock:
+        # 如果thread已经有映射，直接返回
+        if thread_id in thread_user_map:
+            return thread_user_map[thread_id]
+        
+        # 尝试基于时间推断：假设最近@机器人的用户就是这个thread的创建者
+        # 这是一个启发式方法，在多用户同时@机器人时可能不准确
+        if user_last_mention_map:
+            # 简单策略：取最后一个@机器人的用户
+            # 在实际应用中，可能需要更复杂的匹配逻辑
+            recent_user = max(user_last_mention_map.keys(), 
+                            key=lambda u: user_last_mention_map[u])
+            
+            print(f"启发式映射thread到用户: {thread_id} -> {recent_user}")
+            add_thread_user_mapping(thread_id, recent_user)
+            return recent_user
+        
+        return None
+
+
+def add_thread_user_mapping(thread_id: str, user_id: str) -> None:
+    """
+    添加线程ID和用户ID的映射关系
+    
+    参数:
+        thread_id: 线程ID
+        user_id: 用户ID
+    """
+    with thread_map_lock:
+        old_user = thread_user_map.get(thread_id)
+        thread_user_map[thread_id] = user_id
+        if old_user != user_id:
+            print(f"Thread映射更新: {thread_id} {old_user} -> {user_id}")
+        else:
+            print(f"Thread映射确认: {thread_id} -> {user_id}")
+        
+        
+def get_user_id_from_thread(thread_id: str) -> Optional[str]:
+    """
+    根据线程ID获取用户ID
+    
+    参数:
+        thread_id: 线程ID
+        
+    返回:
+        用户ID，如果不存在则返回None
+    """
+    with thread_map_lock:
+        user_id = thread_user_map.get(thread_id)
+        print(f"查询Thread映射: {thread_id} -> {user_id}")
+        return user_id
 
 
 def add_to_history(user_id: str, role: str, content: str) -> None:
@@ -189,33 +273,54 @@ def run_q_chat(message: str, app_id: str, message_id: str, user_id: str) -> str:
         
         # 发送剩余的缓冲区内容
         if buffer:
-            send_lark_request(
+            final_response = send_lark_request(
                 app_id,
                 message_id,
                 json.dumps({"text": "\n".join(buffer)}),
                 reply_in_thread=True
             )
+            print(f"最终缓冲区发送结果: {final_response}")
         
         # 如果没有有效输出，返回错误消息
         if not full_response:
-            error_msg = "无法获取有效回复"
-            send_lark_request(app_id, message_id, json.dumps({"text": error_msg}), reply_in_thread=True)
+            error_msg = "无法获取有效回复，请检查Q CLI是否正常工作"
+            print(f"警告: {error_msg}")
+            error_response = send_lark_request(
+                app_id, 
+                message_id, 
+                json.dumps({"text": error_msg}), 
+                reply_in_thread=True
+            )
+            print(f"错误消息发送结果: {error_response}")
             return error_msg
         
         # 将助手回复添加到历史
         assistant_response = "\n".join(full_response)
         add_to_history(user_id, "assistant", assistant_response)
+        print(f"Q CLI处理完成，回复长度: {len(assistant_response)} 字符")
             
         return assistant_response
     except subprocess.TimeoutExpired:
-        print("q chat 命令执行超时")
         error_msg = "处理请求超时，请稍后再试"
-        send_lark_request(app_id, message_id, json.dumps({"text": error_msg}), reply_in_thread=True)
+        print(f"超时错误: {error_msg}")
+        timeout_response = send_lark_request(
+            app_id, 
+            message_id, 
+            json.dumps({"text": error_msg}), 
+            reply_in_thread=True
+        )
+        print(f"超时错误消息发送结果: {timeout_response}")
         return error_msg
     except Exception as e:
-        print(f"执行 q chat 时发生错误: {e}")
         error_msg = f"执行 q chat 时发生错误: {str(e)}"
-        send_lark_request(app_id, message_id, json.dumps({"text": error_msg}), reply_in_thread=True)
+        print(f"异常错误: {error_msg}")
+        exception_response = send_lark_request(
+            app_id, 
+            message_id, 
+            json.dumps({"text": error_msg}), 
+            reply_in_thread=True
+        )
+        print(f"异常错误消息发送结果: {exception_response}")
         return error_msg
 
 
@@ -229,16 +334,21 @@ def send_lark_request(app_id: str, message_id: str, content: str, reply_in_threa
         content: 消息内容
         reply_in_thread: 是否在thread中回复，默认为True
     """
+    print(f"准备发送飞书消息: app_id={app_id}, message_id={message_id}, reply_in_thread={reply_in_thread}")
+    print(f"消息内容: {content[:100]}...")  # 只显示前100个字符
+    
     # 检查必要参数
     if not app_id or not message_id or not content:
-        print("缺少必要参数")
-        return {"错误": "缺少必要参数"}
+        error_msg = "缺少必要参数"
+        print(f"错误: {error_msg}")
+        return {"错误": error_msg}
 
     # 获取应用密钥
     app_secret = APP_ID_SECRET_MAP.get(app_id)
     if not app_secret:
-        print(f"未找到应用ID对应的密钥: {app_id}")
-        return {"错误": "未找到应用ID对应的密钥"}
+        error_msg = f"未找到应用ID对应的密钥: {app_id}"
+        print(f"错误: {error_msg}")
+        return {"错误": error_msg}
 
     try:
         # 创建飞书客户端
@@ -263,13 +373,77 @@ def send_lark_request(app_id: str, message_id: str, content: str, reply_in_threa
 
         # 处理响应
         if not response.success():
-            print(f"飞书API调用失败: {response.msg}")
-            return {"错误": f"{response.msg}"}
+            error_msg = f"飞书API调用失败: {response.msg} (code: {response.code})"
+            print(f"错误: {error_msg}")
+            return {"错误": error_msg}
         
-        return {"成功": True}
+        print(f"飞书消息发送成功: message_id={message_id}")
+        return {"成功": True, "response_code": response.code}
     except Exception as e:
-        print(f"发送飞书消息时发生错误: {e}")
-        return {"错误": str(e)}
+        error_msg = f"发送飞书消息时发生异常: {str(e)}"
+        print(f"错误: {error_msg}")
+        return {"错误": error_msg}
+
+
+@app.route("/debug", methods=["GET"])
+def debug():
+    """
+    调试端点，显示当前的thread映射和对话状态
+    """
+    try:
+        with thread_map_lock:
+            thread_mappings = dict(thread_user_map)
+            user_mentions = dict(user_last_mention_map)
+        
+        with history_lock:
+            conversation_stats = {}
+            for user_id, messages in conversation_history.items():
+                conversation_stats[user_id] = {
+                    "message_count": len(messages),
+                    "last_message_time": max([ts for ts, _, _ in messages]) if messages else None
+                }
+        
+        debug_info = {
+            "timestamp": time.time(),
+            "thread_mappings": thread_mappings,
+            "user_mentions": user_mentions,
+            "conversation_stats": conversation_stats,
+            "app_ids": list(APP_ID_SECRET_MAP.keys())
+        }
+        
+        return jsonify(debug_info)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/status", methods=["GET"])
+def status():
+    """
+    状态检查端点，用于监控运行状态
+    """
+    try:
+        with thread_map_lock:
+            thread_count = len(thread_user_map)
+            mention_count = len(user_last_mention_map)
+        
+        with history_lock:
+            history_count = len(conversation_history)
+            total_messages = sum(len(messages) for messages in conversation_history.values())
+        
+        status_info = {
+            "status": "running",
+            "timestamp": time.time(),
+            "thread_mappings": thread_count,
+            "user_mentions": mention_count,
+            "active_conversations": history_count,
+            "total_messages": total_messages,
+            "configured_apps": list(APP_ID_SECRET_MAP.keys()),
+            "conversation_expiry_hours": CONVERSATION_EXPIRY / 3600
+        }
+        
+        return jsonify(status_info)
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 @app.route("/webhook", methods=["POST"])
@@ -314,30 +488,103 @@ def webhook():
             print("警告: 无法获取用户ID，将使用消息ID作为用户ID")
             user_id = message_id
 
+        # 提取线程ID
+        thread_id = data.get("event", {}).get("message", {}).get("thread_id", "")
+        
         # 解析消息内容
         content = json.loads(
             data.get("event", {}).get("message", {}).get("content", "{}")
         )
-        # 移除 @at
-        message_text = remove_mentions(content.get("text", ""))
-
-        # 发送初始响应，表示正在处理
-        send_lark_request(
-            app_id, 
-            message_id, 
-            json.dumps({"text": "正在思考中..."}),
-            reply_in_thread=True
-        )
+        message_text = content.get("text", "")
         
-        # 启动一个后台线程来处理请求，这样可以立即返回响应给飞书
-        thread = threading.Thread(
-            target=run_q_chat,
-            args=(message_text, app_id, message_id, user_id)
-        )
-        thread.daemon = True
-        thread.start()
+        # 检查是否在thread中且没有@机器人
+        is_in_thread = bool(thread_id)
+        has_mention = "@" in message_text
         
-        return jsonify({"状态": "成功"})
+        print(f"消息分析: thread_id={thread_id}, has_mention={has_mention}, user_id={user_id}")
+        print(f"原始消息内容: {message_text}")
+        
+        # 如果在thread中且没有@机器人，检查是否是已知的thread
+        if is_in_thread and not has_mention:
+            thread_user = get_user_id_from_thread(thread_id)
+            print(f"Thread用户映射查询: {thread_id} -> {thread_user}")
+            
+            # 如果没有找到映射，尝试用当前用户建立映射
+            if not thread_user:
+                print(f"未找到thread映射，尝试建立新映射: {thread_id} -> {user_id}")
+                add_thread_user_mapping(thread_id, user_id)
+                thread_user = user_id
+            
+            # 验证用户是否匹配（如果映射存在但用户不同，可能是多用户thread）
+            if thread_user != user_id:
+                print(f"用户不匹配，更新映射: {thread_id} {thread_user} -> {user_id}")
+                add_thread_user_mapping(thread_id, user_id)
+                thread_user = user_id
+            
+            # 处理thread中的消息
+            message_text = remove_mentions(message_text)
+            print(f"在thread中处理消息: {message_text} (用户: {thread_user})")
+            
+            # 发送初始响应，表示正在处理
+            initial_response = send_lark_request(
+                app_id, 
+                message_id, 
+                json.dumps({"text": "正在思考中..."}),
+                reply_in_thread=True
+            )
+            print(f"初始响应发送结果: {initial_response}")
+            
+            # 启动一个后台线程来处理请求
+            processing_thread = threading.Thread(
+                target=run_q_chat,
+                args=(message_text, app_id, message_id, thread_user)
+            )
+            processing_thread.daemon = True
+            processing_thread.start()
+            
+            return jsonify({"状态": "thread中回复", "thread_id": thread_id, "user_id": thread_user})
+        
+        # 如果有@机器人，处理消息
+        if has_mention:
+            # 移除@提及
+            message_text = remove_mentions(message_text)
+            
+            print(f"被@机器人，处理消息: {message_text} (用户: {user_id})")
+            
+            # 记录用户@机器人的行为，用于后续thread映射
+            add_user_mention_record(user_id, message_id)
+            
+            # 如果已经在thread中@机器人，直接记录映射
+            if thread_id:
+                add_thread_user_mapping(thread_id, user_id)
+                print(f"在已有thread中@机器人，记录映射: {thread_id} -> {user_id}")
+            else:
+                # 首次@机器人，还没有thread_id
+                # 机器人回复后飞书会创建thread，用户后续回复时我们再建立映射
+                print(f"首次@机器人，用户: {user_id}，等待thread创建")
+            
+            # 发送初始响应，表示正在处理
+            initial_response = send_lark_request(
+                app_id, 
+                message_id, 
+                json.dumps({"text": "正在思考中..."}),
+                reply_in_thread=True
+            )
+            print(f"@机器人初始响应发送结果: {initial_response}")
+            
+            # 启动一个后台线程来处理请求
+            processing_thread = threading.Thread(
+                target=run_q_chat,
+                args=(message_text, app_id, message_id, user_id)
+            )
+            processing_thread.daemon = True
+            processing_thread.start()
+            
+            return jsonify({"状态": "@回复成功", "user_id": user_id, "thread_id": thread_id or "新建"})
+        
+        # 如果既不是在已知thread中，也没有@机器人，则忽略这条消息
+        print(f"忽略消息: 不在thread中且未@机器人")
+        return jsonify({"状态": "忽略"})
     except Exception as e:
         print(f"处理消息时发生错误: {e}")
         # 仍然返回 200，否则飞书开放平台会反复重试

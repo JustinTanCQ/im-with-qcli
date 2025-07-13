@@ -2,7 +2,8 @@ import json
 import re
 import os
 import boto3
-from typing import Dict, Any, Optional
+from typing import Dict, Any
+import threading
 
 import lark_oapi as lark
 from lark_oapi.api.im.v1 import (
@@ -12,6 +13,7 @@ from lark_oapi.api.im.v1 import (
 )
 
 from intent_recognition import check_if_valid_question
+import requests
 
 """
 飞书应用 APP_ID 和 SECRET，可支持多应用：
@@ -29,6 +31,7 @@ for i, app_id in enumerate(LARK_APP_ID.split(",")):
 KNOWLEDGE_BASE_ID = os.environ.get("KNOWLEDGE_BASE_ID", "").strip()
 KNOWLEDGE_MODEL_ARN = os.environ.get("MODEL_ARN", "").strip()
 
+QLI_SERVER_ADDRESS = os.environ.get("QLI_SERVER_ADDRESS", "").strip()
 
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     print(f"收到事件: {event.get('body', {})}")
@@ -93,10 +96,17 @@ def process_message(data: Dict[str, Any]) -> str:
 
         if question_type:
             if question_type == "AWS":
-                # 调用 Q CLI Service
-                return send_lark_request(
-                    app_id, message_id, json.dumps({"text": "Q CLI 尚未实现"})
-                )
+                # 转发 data 请求到 QLI_SERVER_ADDRESS
+                def send_request():
+                    print(f"Sending message to: {QLI_SERVER_ADDRESS}...")
+                    requests.post(
+                        QLI_SERVER_ADDRESS,
+                        data=json.dumps(data),
+                        headers={"Content-Type": "application/json"},
+                    )
+                
+                threading.Thread(target=send_request, daemon=True).start()
+                return {"Result": "Send message successfully."}
             elif question_type == "知识库":
                 if KNOWLEDGE_BASE_ID and KNOWLEDGE_MODEL_ARN:
                     knowledge_base_client = boto3.client(
